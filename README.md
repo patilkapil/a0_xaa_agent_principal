@@ -49,7 +49,7 @@ sequenceDiagram
         participant ResApp as Resource App<br/>(XAA trust anchor)
     end
 
-    box Lavender Orchestrator Agent — Okta AI Agent (A0_XAA)
+    box Lavender Okta Orchestrator Agent (A0_XAA)
         participant RWA as XAA Requesting Party<br/>Regular Web App
     end
 
