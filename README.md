@@ -33,55 +33,45 @@ The protected API can now answer: **"which user was accessed, and which agent di
 ## Architecture
 
 ```mermaid
-flowchart TB
-    USER(["User<br/>authenticates via Okta"])
+sequenceDiagram
+    actor User
 
-    subgraph OKTA["Okta (Identity Provider)"]
-        direction TB
-        OKTA_AS["<b>Org Authorization Server</b><br/>/oauth2/v1/authorize<br/>/oauth2/v1/token<br/>issues id_token + ID-JAG"]
-        OKTA_RES["<b>Okta Resource App</b><br/>OIDC Web App<br/>XAA enabled<br/>Issuer URL = Auth0 tenant<br/>(trust config — not an API)"]
+    box rgb(239,246,255) Okta (Identity Provider)
+        participant OrgAS as Org AS<br/>/oauth2/v1/token
+        participant ResApp as Resource App<br/>(XAA trust anchor)
     end
 
-    subgraph AUTH0["Auth0 (Resource Authorization Server)"]
-        direction TB
-        AUTH0_AS["<b>Auth0 /oauth/token</b><br/>jwt-bearer grant<br/>validates ID-JAG via Okta JWKS<br/>looks up user via your-okta-connection connection"]
-        AUTH0_OBO["<b>Auth0 /oauth/token</b><br/>token-exchange grant (OBO)<br/>adds act.sub = agent_id<br/>requires M2M Custom API Client"]
-        AUTH0_AGENT["<b>Agent Object</b><br/>agt_xxxxxxxxxxxxxxxxxxxx<br/>linked to M2M client<br/>first-class identity principal"]
+    box rgb(253,244,255) Auth0 Applications
+        participant RWA as Regular Web App<br/>(XAA Requesting Party)
+        participant M2M as M2M Custom API Client<br/>(linked to Agent Object)
     end
 
-    subgraph CLIENTS["Auth0 Applications"]
-        direction TB
-        WEBAPP["<b>XAA Requesting Party</b><br/>Regular Web App<br/>Steps 1–3: jwt-bearer exchange<br/>federation conduit only"]
-        M2M["<b>XAA Requesting Party — M2M</b><br/>Machine to Machine<br/>Step 3.5: OBO exchange<br/>Custom API Client (resource_server_id bound)<br/>linked to Agent Object"]
+    box rgb(255,247,237) Auth0 (Resource Authorization Server)
+        participant A0JWT as /oauth/token<br/>jwt-bearer grant
+        participant A0OBO as /oauth/token<br/>OBO token exchange
+        participant Agent as Agent Object<br/>agt_xxxxxxxxxxxxxxxxxxxx
     end
 
-    subgraph API["Protected Resource"]
-        direction TB
-        APISVR["<b>api_server.py</b><br/>:8080<br/>validates JWT via Auth0 JWKS<br/>returns acting_user + acting_agent"]
-    end
+    participant API as Protected API :8080
 
-    USER -- "Step 1a: login (PKCE)" --> OKTA_AS
-    OKTA_AS -- "Step 1b: id_token" --> WEBAPP
-    WEBAPP -- "Step 2: token-exchange\nrequested_token_type=id-jag\naudience=Auth0 issuer" --> OKTA_AS
-    OKTA_AS -- "ID-JAG\n(targeted at Auth0)" --> WEBAPP
-    WEBAPP -- "Step 3: jwt-bearer\nassertion=ID-JAG\nconnection=your-okta-connection" --> AUTH0_AS
-    AUTH0_AS -- "access token\nsub=user" --> WEBAPP
-    WEBAPP -- "Step 3.5: token-exchange OBO\nsubject_token=access_token" --> AUTH0_OBO
-    AUTH0_AGENT -. "linked" .-> M2M
-    M2M -- "authenticates OBO request" --> AUTH0_OBO
-    AUTH0_OBO -- "delegated token\nsub=user\nact.sub=agent_id" --> APISVR
-    APISVR -- "{ acting_user, acting_agent, data }" --> USER
+    Note over ResApp,A0JWT: Resource App registers Auth0 issuer URL as trusted ID-JAG audience
 
-    OKTA_RES -. "trust anchor\nIssuer URL = Auth0" .-> AUTH0_AS
+    User->>OrgAS: 1a · login (Authorization Code + PKCE)
+    OrgAS-->>RWA: 1b · id_token (PKCE callback)
 
-    classDef okta fill:#EFF6FF,stroke:#2563EB,stroke-width:2px,stroke-dasharray:5 5
-    classDef auth0 fill:#FFF7ED,stroke:#F59E0B,stroke-width:2px,stroke-dasharray:5 5
-    classDef api fill:#F0FDF4,stroke:#16A34A,stroke-width:2px,stroke-dasharray:5 5
-    classDef clients fill:#FDF4FF,stroke:#9333EA,stroke-width:2px,stroke-dasharray:5 5
-    class OKTA okta
-    class AUTH0 auth0
-    class API api
-    class CLIENTS clients
+    RWA->>OrgAS: 2 · token-exchange<br/>requested_token_type = id-jag<br/>audience = Auth0 issuer URL
+    OrgAS-->>RWA: ID-JAG (signed by Okta, targeted at Auth0)
+
+    RWA->>A0JWT: 3 · jwt-bearer<br/>assertion = ID-JAG<br/>connection = your-okta-connection
+    A0JWT-->>RWA: access token (sub = user)
+
+    Note over M2M,Agent: M2M client is linked to Agent Object in Auth0
+    RWA->>M2M: hand off access token
+    M2M->>A0OBO: 3.5 · token-exchange OBO<br/>subject_token = access_token<br/>client_id = M2M → resolves to agt_xxx
+    A0OBO-->>M2M: delegated token (sub = user · act.sub = agt_xxx)
+
+    M2M->>API: 4 · GET /data  Bearer delegated_token
+    API-->>M2M: { acting_user, acting_agent, data }
 ```
 
 ---
