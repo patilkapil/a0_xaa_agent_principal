@@ -36,17 +36,17 @@ The protected API can now answer: **"which user was accessed, and which agent di
 sequenceDiagram
     actor User
 
-    box #EFF6FF Okta (Identity Provider)
+    box AliceBlue Okta (Identity Provider)
         participant OrgAS as Org AS<br/>/oauth2/v1/token
         participant ResApp as Resource App<br/>(XAA trust anchor)
     end
 
-    box #FDF4FF Auth0 Applications
+    box Lavender Auth0 Applications
         participant RWA as Regular Web App<br/>(XAA Requesting Party)
         participant M2M as M2M Custom API Client<br/>(linked to Agent Object)
     end
 
-    box #FFF7ED Auth0 (Resource Authorization Server)
+    box OldLace Auth0 (Resource Authorization Server)
         participant A0JWT as /oauth/token<br/>jwt-bearer grant
         participant A0OBO as /oauth/token<br/>OBO token exchange
         participant Agent as Agent Object<br/>agt_xxxxxxxxxxxxxxxxxxxx
