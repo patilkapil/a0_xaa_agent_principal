@@ -1,6 +1,6 @@
 # XAA + Agent as a Principal
 
-A working implementation of **Cross-App Access (XAA)** combined with **Agent as a Principal** — where Okta acts as the Identity Provider, Auth0 acts as the Resource Authorization Server, and an AI agent is a first-class identity principal in the final access token.
+A working implementation of a **two-agent architecture** combining Cross-App Access (XAA) with Agent as a Principal — where an Okta AI Agent orchestrates cross-IdP identity federation, and an Auth0 observer agent becomes a named, auditable principal in every downstream API call.
 
 Built against:
 - Auth0 Cross-App Access docs: https://auth0.com/docs/ai-agents-mcp/cross-app-access
@@ -10,7 +10,11 @@ Built against:
 
 ## What this project demonstrates
 
-Most agentic systems today use the user's identity to call downstream APIs — the agent is invisible in the token. This project shows how to make the agent a **named, auditable identity** in every token it uses, while still preserving the user's delegated identity.
+This project implements a **two-agent architecture** for auditable, cross-IdP API access:
+
+**Orchestrator Agent** (Okta AI Agent `A0_XAA`) — handles identity federation across IdP boundaries. It acquires the user's identity from Okta and federates it into Auth0's domain via XAA. Its role is infrastructure: cross the boundary, hand off the token. It does not appear in the final token.
+
+**Observer Agent** (Auth0 Agent Object `agt_xxx`) — executes the actual API call as a named principal. Its identity is stamped into every token it uses as `act.sub`, making it visible and auditable to the downstream API.
 
 The final access token carries two identities:
 
@@ -24,9 +28,13 @@ The final access token carries two identities:
 ```
 
 - `sub` — the user the agent is acting for
-- `act.sub` — the specific agent that made the request
+- `act.sub` — the observer agent that made the request
 
-The protected API can now answer: **"which user was accessed, and which agent did it."**
+The downstream API can answer two accountability questions:
+- **"Which user was accessed?"** → `sub`
+- **"Which agent did it?"** → `act.sub`
+
+Observability is intentionally split: the orchestrator's actions are visible in Okta audit logs (Steps 1–2). The observer agent's identity is carried in the token chain (Step 3.5 onward).
 
 ---
 
@@ -41,33 +49,38 @@ sequenceDiagram
         participant ResApp as Resource App<br/>(XAA trust anchor)
     end
 
-    box Lavender Auth0 Applications
-        participant RWA as Regular Web App<br/>(XAA Requesting Party)
-        participant M2M as M2M Custom API Client<br/>(linked to Agent Object)
+    box Lavender Orchestrator Agent — Okta AI Agent (A0_XAA)
+        participant RWA as XAA Requesting Party<br/>Regular Web App
     end
 
     box OldLace Auth0 (Resource Authorization Server)
         participant A0JWT as /oauth/token<br/>jwt-bearer grant
         participant A0OBO as /oauth/token<br/>OBO token exchange
-        participant Agent as Agent Object<br/>agt_xxxxxxxxxxxxxxxxxxxx
+        participant AgentObj as Agent Object<br/>agt_xxxxxxxxxxxxxxxxxxxx
+    end
+
+    box LightGreen Observer Agent — Auth0 (agt_xxx)
+        participant M2M as M2M Custom API Client<br/>linked to agt_xxxxxxxxxxxxxxxxxxxx
     end
 
     participant API as Protected API :8080
 
     Note over ResApp,A0JWT: Resource App registers Auth0 issuer URL as trusted ID-JAG audience
 
-    User->>OrgAS: 1a · login (Authorization Code + PKCE)
+    User->>RWA: 1a · login (Authorization Code + PKCE)
+    RWA->>OrgAS: redirect to Okta
     OrgAS-->>RWA: 1b · id_token (PKCE callback)
 
+    Note over RWA,OrgAS: Orchestrator uses OKTA_CLIENT_ID (A0_XAA) to request ID-JAG
     RWA->>OrgAS: 2 · token-exchange<br/>requested_token_type = id-jag<br/>audience = Auth0 issuer URL
     OrgAS-->>RWA: ID-JAG (signed by Okta, targeted at Auth0)
 
     RWA->>A0JWT: 3 · jwt-bearer<br/>assertion = ID-JAG<br/>connection = your-okta-connection
     A0JWT-->>RWA: access token (sub = user)
 
-    Note over M2M,Agent: M2M client is linked to Agent Object in Auth0
+    Note over M2M,AgentObj: Observer Agent takes over — identity stamped into token as act.sub
     RWA->>M2M: hand off access token
-    M2M->>A0OBO: 3.5 · token-exchange OBO<br/>subject_token = access_token<br/>client_id = M2M → resolves to agt_xxx
+    M2M->>A0OBO: 3.5 · token-exchange OBO<br/>subject_token = access_token<br/>client_id = M2M → agt_xxx
     A0OBO-->>M2M: delegated token (sub = user · act.sub = agt_xxx)
 
     M2M->>API: 4 · GET /data  Bearer delegated_token
@@ -81,14 +94,16 @@ sequenceDiagram
 ```
 Step 1   User logs in to Okta (Authorization Code + PKCE)
              → Okta issues id_token
+             → Orchestrator Agent (A0_XAA) receives the id_token via PKCE callback
 
-Step 2   Regular Web App exchanges id_token at Okta Org AS
-             → Okta issues ID-JAG  (targeted at Auth0 tenant issuer)
+Step 2   Orchestrator Agent exchanges id_token at Okta Org AS → ID-JAG
+             → Okta issues ID-JAG targeted at Auth0 tenant issuer
+             → Orchestrator's Okta identity (OKTA_CLIENT_ID) authenticates this call
              grant_type           = urn:ietf:params:oauth:grant-type:token-exchange
              requested_token_type = urn:ietf:params:oauth:token-type:id-jag
              audience             = https://your-tenant.auth0.com
 
-Step 3   Regular Web App presents ID-JAG at Auth0 (jwt-bearer)
+Step 3   Orchestrator Agent presents ID-JAG at Auth0 (jwt-bearer)
              → Auth0 validates ID-JAG against Okta JWKS
              → Auth0 looks up user via your-okta-connection enterprise connection
              → Auth0 issues access token:  sub = user
@@ -96,16 +111,17 @@ Step 3   Regular Web App presents ID-JAG at Auth0 (jwt-bearer)
              assertion  = <ID-JAG>
              connection = your-okta-connection
 
-Step 3.5 M2M client performs OBO token exchange at Auth0
-             → Auth0 recognises M2M client is linked to agent object
-             → Auth0 stamps act.sub = agent_id into new token
-             → Token now carries both user and agent identity
+Step 3.5 Observer Agent (agt_xxx) performs OBO token exchange at Auth0
+             → Orchestrator hands access token to Observer Agent's M2M client
+             → Auth0 recognises M2M client is linked to the agent object (agt_xxx)
+             → Auth0 stamps act.sub = agt_xxx into new token
+             → Token now carries both user identity and observer agent identity
              grant_type         = urn:ietf:params:oauth:grant-type:token-exchange
              subject_token      = <Step 3 access token>
-             client_id          = <M2M client>   ← linked to agent object
+             client_id          = <M2M client>   ← linked to agt_xxx
              audience           = https://your-api-identifier/
 
-Step 4   Agent calls protected API with OBO delegated token
+Step 4   Observer Agent calls protected API with OBO delegated token
              → API validates JWT, reads sub + act.sub
              → Returns { acting_user, acting_agent, data }
 ```
@@ -113,6 +129,21 @@ Step 4   Agent calls protected API with OBO delegated token
 ---
 
 ## Key concepts
+
+### Two-agent architecture
+
+This project separates agent responsibilities into two distinct roles:
+
+| Role | Agent | Identity used | Visible where |
+|---|---|---|---|
+| **Orchestrator** | Okta AI Agent (`A0_XAA`) | `OKTA_CLIENT_ID` at Okta | Okta audit logs (Steps 1–2) |
+| **Observer** | Auth0 Agent Object (`agt_xxx`) | `act.sub` in token | Token claims (Step 3.5 onward) |
+
+The **orchestrator's** sole job is identity plumbing — crossing IdP boundaries to get a user token from Okta's domain into Auth0's domain. It is not a named principal in any token. Its accountability lives in Okta's logs.
+
+The **observer's** job is task execution — it calls the API and its identity is stamped into every token it uses. The downstream API holds it accountable via `act.sub`.
+
+These are intentionally different agents with different roles. The split observability is the design, not a gap: Okta owns the orchestrator's audit trail, Auth0 owns the observer's.
 
 ### Cross-App Access (XAA)
 XAA allows an agent to obtain a delegated access token for a downstream API using the user's identity from a different IdP — without requiring the user to log in again. Okta issues an **ID-JAG** (Identity Assertion Authorization Grant), a signed JWT that Auth0 accepts as proof of the user's identity.
@@ -147,14 +178,23 @@ The M2M client in Step 3.5 is an **autonomous actor** — it claims "I am the ag
 
 ---
 
-## Auth0 objects required
+## Objects required
+
+**Okta:**
+
+| Object | Type | Purpose |
+|---|---|---|
+| `A0_XAA` AI Agent | Okta AI Agent | Orchestrator. Authenticates Steps 1–2 using `OKTA_CLIENT_ID`. Requests ID-JAGs targeted at Auth0. |
+| Auth0 Resource App | OIDC Web App (XAA enabled) | Trust anchor. Registers Auth0's issuer URL as a valid ID-JAG audience. Not active in the flow. |
+
+**Auth0:**
 
 | Object | Type | Purpose |
 |---|---|---|
 | XAA API | Resource Server | Represents the protected API. Identifier = `https://your-api-identifier/` |
-| XAA Requesting Party | Regular Web App | Performs jwt-bearer exchange (Steps 1–3). Must have `your-okta-connection` enterprise connection. |
-| XAA Requesting Party — M2M | Machine to Machine | Performs OBO exchange (Step 3.5). Must be created from the API page (Custom API Client). |
-| xaa-agent | Agent Object | Registered agent identity (`agt_xxxxxxxxxxxxxxxxxxxx`). Linked to the M2M client. |
+| XAA Requesting Party | Regular Web App | jwt-bearer conduit (Step 3). Presents ID-JAG to Auth0. Must have Okta enterprise connection enabled. |
+| XAA Requesting Party — M2M | Machine to Machine | Observer Agent's client (Step 3.5). Must be created from the API page (Custom API Client). Linked to Agent Object. |
+| `agt_xxx` | Agent Object | Observer Agent identity. Stamped as `act.sub` in OBO tokens. Linked to the M2M client. |
 
 ---
 
@@ -400,3 +440,5 @@ The UI shows each token (raw + decoded payload side by side) and the final API r
 6. **Token exchange grant must be explicitly enabled** — go to the M2M client → Advanced Settings → Grant Types → enable `urn:ietf:params:oauth:grant-type:token-exchange`.
 
 7. **XAA and Agent as a Principal are independent concerns** — XAA solves "how do I get a user token across identity systems." Agent as a Principal solves "how do I stamp the agent's identity onto that token." If the user already has an Auth0 token from any flow, you can skip XAA and go straight to OBO.
+
+8. **The two agents are not the same agent registered twice** — The Okta AI Agent (`A0_XAA`) and the Auth0 Agent Object (`agt_xxx`) are different agents with different roles. The orchestrator handles cross-IdP federation and is accountable in Okta's audit logs. The observer handles task execution and is accountable in the token's `act.sub` claim. There is no protocol-level binding between them — this is intentional. Each system owns its own audit trail for the role that system manages.
